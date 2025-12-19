@@ -1,65 +1,81 @@
 import os
-from openai import OpenAI
-# from google import genai # Gemini API 클라이언트
-# from anthropic import Anthropic # Claude API 클라이언트
+import json
+import time
+import google.generativeai as genai
+from google.api_core import exceptions
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class LLMClient:
-    def __init__(self, model="gpt-3.5-turbo-1106"): # 실제 최고 성능 모델로 교체 (예: gemini-3.0-pro)
-        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) 
-        self.model = model
+    def __init__(self, model_name="gemini-2.5-flash"):
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY가 .env 파일에 없습니다.")
         
-        # Function Calling 도구 정의 (기존 베이스라인 유지)
-        self.tools = [
-            # ... (search function 정의) ...
-        ]
+        genai.configure(api_key=api_key)
+        self.model = genai.GenerativeModel(model_name)
         
-        # MAP 극대화를 위한 의도 분석 프롬프트 (최신 모델에 최적화)
-        self.persona_function_calling = """
-## Role: 과학 상식 전문가 (Query Analyst)
+        # MAP 극대화용 프롬프트
+        self.persona_query = """
+        ## Role: 과학 상식 전문가
+        - 과학 질문이면 'search' 도구를 호출하여 'standalone_query'를 생성하라.
+        - 일상 인사나 비과학 질문이면 도구를 호출하지 말고 직접 답하라. (MAP 확보 핵심)
+        """
+        
+    def _call_with_retry(self, func, *args, max_retries=15, initial_wait=5, **kwargs):
+        for i in range(max_retries):
+            try:
+                return func(*args, **kwargs)
+            except exceptions.ResourceExhausted:
+                wait = initial_wait * (2 ** i)
+                print(f"Rate Limit! {wait}초 대기 중...")
+                time.sleep(wait)
+            except Exception as e:
+                print(f"오류: {e}")
+                raise
+        return None
 
-## Instruction
-- 사용자의 대화 기록을 분석하여 **'과학 지식에 관한 주제'**로 질문한 경우에만 search API를 호출해야 한다.
-- **일상 대화 (chit-chat)**, 사적인 질문, 단순 인사 등 과학 상식과 관련되지 않은 나머지 대화 메시지에는 **절대 search API를 호출하지 않고**, 적절하고 간결한 답변을 생성한다. **(MAP 극대화 핵심)**
-- 멀티턴 대화인 경우, 이전 문맥을 통합하여 **가장 명확하고 검색에 적합한 하나의 'standalone_query'**를 생성한다.
-"""
-        self.persona_qa = """
-## Role: 과학 상식 전문가 (Answer Generator)
-
-## Instructions
-- 사용자의 이전 메시지 정보 및 주어진 Reference 정보를 활용하여 간결하게 답변을 생성한다.
-- 주어진 검색 결과 정보로 대답할 수 없는 경우는 정보가 부족해서 답을 할 수 없다고 대답한다.
-- 한국어로 답변을 생성한다.
-"""
-    
     def analyze_query(self, messages):
-        # 1. 의도 분석 및 쿼리 생성
-        msg = [{"role": "system", "content": self.persona_function_calling}] + messages
-        try:
-            result = self.client.chat.completions.create(
-                model=self.model,
-                messages=msg,
-                tools=self.tools,
-                temperature=0,
-                timeout=10
-            )
-            return result.choices[0].message
-        except Exception:
-            return None
+        tools = [{"function_declarations": [{
+            "name": "search",
+            "description": "과학 지식 검색",
+            "parameters": {"type": "OBJECT", "properties": {"standalone_query": {"type": "STRING"}}, "required": ["standalone_query"]}
+        }]}]
+        
+        response = self._call_with_retry(self.model.generate_content, str(messages), tools=tools)
+        
+        # OpenAI 호환 스타일로 변환하여 반환
+        class MockCall:
+            def __init__(self, args): self.function = type('obj', (object,), {'arguments': json.dumps(args)})
+        
+        tool_calls = []
+        response_text = None
+        
+        if response and hasattr(response, 'candidates') and response.candidates:
+            try:
+                if hasattr(response.candidates[0], 'content') and hasattr(response.candidates[0].content, 'parts'):
+                    for part in response.candidates[0].content.parts:
+                        if hasattr(part, 'function_call') and part.function_call:
+                            tool_calls.append(MockCall(dict(part.function_call.args)))
+            except:
+                pass
+            
+            # text 속성에 안전하게 접근
+            try:
+                if not tool_calls and hasattr(response, 'text'):
+                    response_text = response.text
+            except:
+                pass
+        
+        return type('obj', (object,), {'content': response_text, 'tool_calls': tool_calls})
 
-    def generate_answer(self, messages, retrieved_context):
-        # 3. 최종 QA
-        content = f"검색된 참고 자료:\n{retrieved_context}"
-        messages.append({"role": "assistant", "content": content})
-        msg = [{"role": "system", "content": self.persona_qa}] + messages
-        try:
-            qa_result = self.client.chat.completions.create(
-                model=self.model,
-                messages=msg,
-                temperature=0,
-                timeout=30
-            )
-            return qa_result.choices[0].message.content
-        except Exception:
-            return "정보가 부족해서 답을 할 수 없습니다."
+    def generate_answer(self, messages, context):
+        prompt = f"참고자료:\n{context}\n\n질문: {messages[-1]['content']}"
+        response = self._call_with_retry(self.model.generate_content, prompt)
+        return response.text if response else "답변을 생성할 수 없습니다."
 
-llm_client = LLMClient(model="gpt-4-turbo-2024-04-09") # 최신 GPT-4 모델 예시
+llm_client = LLMClient()
+
+
+llm_client = LLMClient()

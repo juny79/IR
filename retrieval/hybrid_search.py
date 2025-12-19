@@ -24,7 +24,6 @@ def hard_vote_results(sparse_res, dense_res_list, top_k=5, weights=[5, 3, 1]):
     for dense_res in dense_res_list:
         for i, hit in enumerate(dense_res['hits']['hits']):
             docid = hit['_source']['docid']
-            # Hard Voting을 위해 중복된 docid는 점수가 합산될 수 있도록 list에 추가
             all_hits[docid].append({'source': 'dense', 'rank': i + 1, 'score': hit['_score']})
     
     # 2. Hard Voting 스코어 계산 (5:3:1 가중치 적용)
@@ -40,29 +39,22 @@ def hard_vote_results(sparse_res, dense_res_list, top_k=5, weights=[5, 3, 1]):
                 score += weights[1]
             elif hit['rank'] == 3 and len(weights) > 2:
                 score += weights[2]
+            else:
+                # 4위 이하는 작은 가중치 (0.5)
+                score += 0.5
             
         final_scores[docid] = score
         
     # 3. 최종 점수 기준으로 정렬 및 Top-K 선택
-    # docid를 기준으로 정렬하고, 최종 Top-K를 선정합니다.
     sorted_docids = sorted(final_scores.keys(), key=lambda x: final_scores[x], reverse=True)
     top_docids = sorted_docids[:top_k]
     
-    # 4. 최종 Top-K 문서 정보를 Elasticsearch에서 조회
-    # (실제 구현 시, ES의 mget 또는 filter query를 사용하여 문서 내용(content)을 가져와야 함)
-    # 여기서는 docid와 final_score만 반환 (실제 content 조회 로직 필요)
-    
+    # 4. 최종 Top-K 문서 정보 반환
     final_topk_results = []
-    # (가져온 content와 docid를 매핑하여 final_topk_results 리스트 구성)
-    # 임시 코드:
     for docid in top_docids:
-        # ES에서 docid로 문서 content를 가져오는 함수 호출 가정
-        # doc_content = get_content_by_docid(docid) 
-        doc_content = f"문서 내용: {docid}"
         final_topk_results.append({
             "docid": docid,
-            "score": final_scores[docid],
-            "content": doc_content
+            "score": final_scores[docid]
         })
         
     return final_topk_results

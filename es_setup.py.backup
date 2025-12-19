@@ -2,19 +2,17 @@ import os
 import json
 import urllib3
 from elasticsearch import Elasticsearch, helpers
-from dotenv import load_dotenv
 from models.embedding_client import embedding_client
 
-# 1. 환경변수 로드
-load_dotenv()
-
-# 2. 보안 경고 끄기
+# 보안 경고 끄기
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 3. Elasticsearch 클라이언트 (HTTP로 접속)
+# [.env] 의존성 제거: 비밀번호를 직접 입력했습니다.
 es = Elasticsearch(
-    "http://localhost:9200",
-    basic_auth=("elastic", os.getenv("ES_PASSWORD"))
+    "https://localhost:9200",
+    basic_auth=("elastic", "JeCGV5SU5*XAYqHkxPFi"), 
+    verify_certs=False,
+    ssl_show_warn=False
 )
 
 def create_index():
@@ -28,26 +26,17 @@ def create_index():
                     "decompound_mode": "mixed",
                     "filter": ["nori_posfilter"]
                 }
-            },
-            "filter": {
-                "nori_posfilter": {
-                    "type": "nori_part_of_speech",
-                    "stoptags": ["E", "J", "SC", "SE", "SF", "VCN", "VCP", "VX"]
-                }
             }
         }
     }
-    
     mappings = {
         "properties": {
             "docid": {"type": "keyword"},
             "content": {"type": "text", "analyzer": "nori"},
-            "embeddings_sbert": {
-                "type": "dense_vector", "dims": 768, "index": True, "similarity": "l2_norm"
-            }
+            "embeddings_sbert": {"type": "dense_vector", "dims": 768, "index": True, "similarity": "l2_norm"}
         }
     }
-
+    
     if es.indices.exists(index=index_name):
         es.indices.delete(index=index_name)
     es.indices.create(index=index_name, settings=settings, mappings=mappings)
@@ -62,29 +51,23 @@ def index_documents(file_path):
     print(f"Start embedding and indexing {len(docs)} documents...")
     
     for i, doc in enumerate(docs):
-        # 문서 내용 추출 및 임베딩 생성
-        content = doc["content"]
         doc_id = doc.get("documentID") or doc.get("docid")
+        content = doc["content"]
         
-        # SBERT 임베딩 생성
+        # 임베딩 생성
         embedding = embedding_client.get_embedding(content, model_name="sbert").tolist()
         
         doc["embeddings_sbert"] = embedding
         doc["docid"] = doc_id
         
-        actions.append({
-            "_index": "test",
-            "_source": doc
-        })
+        actions.append({"_index": "test", "_source": doc})
         
         if (i+1) % 100 == 0:
             print(f"Processed {i+1} documents...")
 
-    # Bulk Indexing 수행
     helpers.bulk(es, actions)
     print("Bulk indexing completed.")
 
 if __name__ == "__main__":
-    # 실행 순서: 인덱스 생성 -> 데이터 삽입
     create_index()
     index_documents("./data/documents.jsonl")

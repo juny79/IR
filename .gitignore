@@ -1,2 +1,6 @@
 .env
 baseline/
+elasticsearch-8.8.0/
+__pycache__
+*.csv
+*.log

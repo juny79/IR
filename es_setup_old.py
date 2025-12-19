@@ -8,10 +8,10 @@ from models.embedding_client import embedding_client
 # 1. 환경변수 로드
 load_dotenv()
 
-# 2. 보안 경고 끄기
+cd /root/IR && git remote -v && echo "---" && git branch -a && echo "---" && git status 위해 필수)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 3. Elasticsearch 클라이언트 (HTTP로 접속)
+# 3. Elasticsearch 클        직접 생성 (HTTP로 접속)
 es = Elasticsearch(
     "http://localhost:9200",
     basic_auth=("elastic", os.getenv("ES_PASSWORD"))
@@ -80,7 +80,7 @@ def index_documents(file_path):
         if (i+1) % 100 == 0:
             print(f"Processed {i+1} documents...")
 
-    # Bulk Indexing 수행
+    # Bulk Indexing 수
     helpers.bulk(es, actions)
     print("Bulk indexing completed.")
 
