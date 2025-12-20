@@ -74,6 +74,38 @@ class LLMClient:
         prompt = f"참고자료:\n{context}\n\n질문: {messages[-1]['content']}"
         response = self._call_with_retry(self.model.generate_content, prompt)
         return response.text if response else "답변을 생성할 수 없습니다."
+    
+    def generate_hypothetical_answer(self, query):
+        """
+        HyDE: 질문에 대한 가상의 이상적인 답변 생성
+        짧은 질문을 풍부한 문서 형태로 확장하여 검색 정확도 향상
+        
+        Args:
+            query: 검색 질문
+            
+        Returns:
+            가상 답변 (200-300자)
+        """
+        prompt = f"""다음 질문에 대한 이상적인 답변을 200자 이내로 간결하게 작성하세요.
+전문 용어와 핵심 개념을 포함하되, 자연스러운 문장으로 작성하세요.
+
+질문: {query}
+
+답변:"""
+        
+        try:
+            response = self._call_with_retry(
+                self.model.generate_content, 
+                prompt,
+                max_retries=3,
+                initial_wait=2
+            )
+            if response and hasattr(response, 'text'):
+                return response.text.strip()
+            return ""
+        except Exception as e:
+            print(f"HyDE 생성 실패: {e}")
+            return ""
 
 llm_client = LLMClient()
 

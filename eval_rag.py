@@ -11,19 +11,35 @@ def answer_question_optimized(messages):
         query = json.loads(analysis.tool_calls[0].function.arguments)['standalone_query']
         res["standalone_query"] = query
         
-        # Hybrid Search 실행 (5:3:1 가중치 앙상블)
-        final_ranked_results = run_hybrid_search(query)
+        # ⭐ 전략 A: Sparse와 Reranker에 HyDE 적용
+        hypothetical_answer = llm_client.generate_hypothetical_answer(query)
         
-        # Top-K docid 추출
-        res["topk"] = [doc["docid"] for doc in final_ranked_results]
+        # HyDE 확장 쿼리 생성
+        if hypothetical_answer:
+            hyde_query = f"{query}\n{hypothetical_answer}"
+        else:
+            hyde_query = query
+        
+        # Hybrid Search with Reranker 실행
+        # - Sparse: HyDE 확장 쿼리 사용 (키워드 풍부화)
+        # - Dense: 원본 쿼리 사용 (임베딩 품질 유지)
+        # - Reranker: HyDE 쿼리 사용 (Sparse와 일관성 확보) ⭐
+        final_ranked_results = run_hybrid_search(
+            original_query=query,
+            sparse_query=hyde_query,
+            reranker_query=hyde_query  # 새로 추가
+        )
+        
+        # final_ranked_results는 이제 docid 리스트 형태
+        res["topk"] = final_ranked_results[:5]  # 상위 5개
         
         # 컨텍스트 생성: Top-3 문서 내용 사용
         context_docs = []
-        for doc in final_ranked_results[:3]:
+        for docid in final_ranked_results[:3]:
             # ES에서 docid 필드로 검색하여 실제 content 가져오기
             search_result = es.search(
                 index="test",
-                query={"term": {"docid": doc["docid"]}},
+                query={"term": {"docid": docid}},
                 size=1
             )
             if search_result['hits']['hits']:
