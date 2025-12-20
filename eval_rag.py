@@ -3,6 +3,9 @@ from models.llm_client import llm_client
 from retrieval.hybrid_search import run_hybrid_search
 from retrieval.es_connector import es
 
+# 🎯 파라미터: Hard Voting 가중치 (환경에 따라 변경)
+VOTING_WEIGHTS = [7, 4, 2]  # 테스트: [7, 4, 2] (기본: [5, 3, 1], 튜닝: [6, 3, 1])
+
 def answer_question_optimized(messages):
     res = {"standalone_query": "", "topk": [], "answer": ""}
     analysis = llm_client.analyze_query(messages)
@@ -11,7 +14,7 @@ def answer_question_optimized(messages):
         query = json.loads(analysis.tool_calls[0].function.arguments)['standalone_query']
         res["standalone_query"] = query
         
-        # ⭐ 전략 A: Sparse와 Reranker에 HyDE 적용
+        # ⭐ Phase 2: HyDE를 전체에 적용 (일관된 파이프라인)
         hypothetical_answer = llm_client.generate_hypothetical_answer(query)
         
         # HyDE 확장 쿼리 생성
@@ -20,14 +23,16 @@ def answer_question_optimized(messages):
         else:
             hyde_query = query
         
-        # Hybrid Search with Reranker 실행
-        # - Sparse: HyDE 확장 쿼리 사용 (키워드 풍부화)
-        # - Dense: 원본 쿼리 사용 (임베딩 품질 유지)
-        # - Reranker: HyDE 쿼리 사용 (Sparse와 일관성 확보) ⭐
+        # Hybrid Search with Reranker 실행 (HyDE 전체 적용)
+        # - Sparse: HyDE 확장 쿼리 사용
+        # - Dense: HyDE 확장 쿼리 사용 (일관성)
+        # - Reranker: 원본 쿼리 사용 (정확한 relevance 판단) ⭐
+        # - Hard Voting: 최적화된 가중치 사용
         final_ranked_results = run_hybrid_search(
             original_query=query,
             sparse_query=hyde_query,
-            reranker_query=hyde_query  # 새로 추가
+            reranker_query=query,  # 원본 쿼리로 복구
+            voting_weights=VOTING_WEIGHTS  # 파라미터 튜닝용 ⭐
         )
         
         # final_ranked_results는 이제 docid 리스트 형태

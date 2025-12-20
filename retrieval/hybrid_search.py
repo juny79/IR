@@ -100,34 +100,41 @@ def get_documents_batch(docids):
     except:
         return {}
 
-def run_hybrid_search(original_query, sparse_query=None, reranker_query=None, top_k_retrieve=50, top_k_final=5):
+def run_hybrid_search(original_query, sparse_query=None, reranker_query=None, top_k_retrieve=50, top_k_final=5, voting_weights=None):
     """
-    Hybrid Search with Reranker (전략 A: Sparse와 Reranker에 HyDE 적용)
+    Hybrid Search with Reranker (Phase 2: HyDE 전체 적용)
     
     Args:
-        original_query: 원본 검색 질문 (Dense에 사용)
+        original_query: 원본 검색 질문 (Reranker에 사용)
         sparse_query: Sparse Search용 쿼리 (HyDE 확장, None이면 original_query 사용)
-        reranker_query: Reranker용 쿼리 (HyDE 확장, None이면 original_query 사용) ⭐
+        reranker_query: Reranker용 쿼리 (None이면 original_query 사용)
         top_k_retrieve: 초기 검색에서 가져올 문서 개수 (넓게 검색)
         top_k_final: 최종 반환할 문서 개수
+        voting_weights: Hard Voting 가중치 (기본: [5, 3, 1])
     """
-    # Step 1: Sparse + Dense 검색 (넓게 검색 - Top 50)
     from retrieval.es_connector import sparse_retrieve, dense_retrieve
     
-    # Sparse: HyDE 확장 쿼리 사용 (키워드 풍부화)
+    # 기본값 설정
+    if voting_weights is None:
+        voting_weights = [5, 3, 1]
     if sparse_query is None:
         sparse_query = original_query
+    if reranker_query is None:
+        reranker_query = original_query
+    
+    # Step 1: Sparse + Dense 검색 (넓게 검색 - Top 50)
+    # Sparse: HyDE 확장 쿼리 사용 (키워드 풍부화)
     sparse_res = sparse_retrieve(sparse_query, top_k_retrieve)
     
-    # Dense: 원본 쿼리 사용 (임베딩 품질 유지)
-    dense_res = dense_retrieve(original_query, top_k_retrieve, "embeddings_sbert")
+    # Dense: HyDE 확장 쿼리 사용 (Phase 2)
+    dense_res = dense_retrieve(sparse_query, top_k_retrieve, "embeddings_sbert")
     
     # Step 2: Hard Voting으로 Top 20 후보 추출
     candidates_with_scores = hard_vote_results(
         sparse_res, 
         [dense_res], 
         top_k=20,  # Reranker에 넘길 후보 개수
-        weights=[5, 3, 1]
+        weights=voting_weights
     )
     
     # docid만 추출
