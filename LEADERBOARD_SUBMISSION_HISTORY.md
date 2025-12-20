@@ -30,12 +30,12 @@
 
 | Phase | Sparse | Dense | Hard Voting | Reranker | HyDE (LLM) | API LLM | Retrieve Method | MAP | MRR | 변화율 | 상태 |
 |-------|--------|-------|-------------|----------|------------|---------|-----------------|-----|-----|--------|------|
-| **BASELINE(1)** | BM25<br>(원본) | SBERT<br>(원본) | [5,3,1] | ❌ | ❌ | - | Hybrid<br>(Basic) | 0.6629 | 0.6659 | 기준 | 기존 |
-| **BASELINE(2)** | BM25<br>(원본) | SBERT<br>(원본) | [5,3,1] | ❌ | ❌ | - | Hybrid<br>(Basic) | 0.6803 | - | +2.6% | 개선 |
-| **Phase 1** | BM25<br>(원본) | SBERT<br>(원본) | [5,3,1] | ✅<br>BGE-v2-m3 | ❌ | - | Hybrid + Reranker<br>(2-Stage) | 0.7742 | 0.7796 | **+16.8%** | 🚀 |
+| **BASELINE(1)** | BM25<br>(원본) | SBERT<br>(원본) | [5,3,1] | ❌ | ❌ | - | Hybrid<br>(Basic) | 0.6629 | 0.6712 | 기준 | 기존 |
+| **BASELINE(2)** | BM25<br>(원본) | SBERT<br>(원본) | [5,3,1] | ❌ | ❌ | - | Hybrid<br>(Basic) | 0.6803 | 0.6879 | +2.6% | 개선 |
+| **Phase 1** | BM25<br>(원본) | SBERT<br>(원본) | [5,3,1] | ✅<br>BGE-v2-m3 | ❌ | - | Hybrid + Reranker<br>(2-Stage) | 0.7742 | 0.7773 | **+16.8%** | 🚀 |
 | **Phase 2** | BM25<br>(HyDE) | SBERT<br>(HyDE) | [5,3,1] | ✅<br>BGE-v2-m3 | ✅<br>Full | Gemini 2.5 Flash | HyDE Hybrid<br>+ Reranker | 0.7970 | 0.8015 | **+2.9%** | ⭐ |
-| **Phase 2-A** ❌ | BM25<br>(HyDE) | SBERT<br>(원본) | [5,3,1] | ✅<br>BGE-v2-m3 | ✅<br>Sparse Only | Gemini 2.5 Flash | Hybrid<br>(Partial HyDE) | 0.7962 | 0.8007 | -0.1% | 실패 |
-| **Strategy A** ❌ | BM25<br>(HyDE) | SBERT<br>(HyDE) | [5,3,1] | ✅<br>BGE-v2-m3 | ✅<br>Reranker | Gemini 2.5 Flash | HyDE Hybrid<br>+ HyDE Reranker | 0.7780 | 0.7829 | -2.4% | 실패 |
+| **Phase 2-A** ❌ | BM25<br>(HyDE) | SBERT<br>(원본) | [5,3,1] | ✅<br>BGE-v2-m3 | ✅<br>Sparse Only | Gemini 2.5 Flash | Hybrid<br>(Partial HyDE) | 0.7962 | 0.7985 | -0.1% | 실패 |
+| **Strategy A** ❌ | BM25<br>(HyDE) | SBERT<br>(HyDE) | [5,3,1] | ✅<br>BGE-v2-m3 | ✅<br>Reranker | Gemini 2.5 Flash | HyDE Hybrid<br>+ HyDE Reranker | 0.7780 | 0.7818 | -2.4% | 실패 |
 | **CURRENT** ⭐ | BM25<br>(HyDE) | SBERT<br>(HyDE) | **[6,3,1]** | ✅<br>BGE-v2-m3 | ✅<br>Full | Gemini 2.5 Flash | HyDE Hybrid<br>+ Reranker | **0.8470** | **0.8500** | **+6.3%** | 최고 |
 | **Submission 8** 🔴 | BM25<br>(HyDE) | SBERT<br>(HyDE) | **[7,4,2]** | ✅<br>BGE-v2-m3 | ✅<br>Full | Gemini 2.5 Flash | HyDE Hybrid<br>+ Reranker | 0.8182 | 0.8212 | -3.4% | 실패 |
 
@@ -54,7 +54,7 @@
 
 **결과:**
 - MAP: **0.6629**
-- MRR: 0.6659
+- MRR: 0.6712
 - 상태: 기준선
 
 **특징:**
@@ -89,7 +89,7 @@
 
 **결과:**
 - MAP: **0.7742** (+16.8%)
-- MRR: 0.7796
+- MRR: 0.7773
 - 상태: 🚀 **대폭 개선**
 
 **핵심 성과:**
@@ -136,7 +136,7 @@
 
 **결과:**
 - MAP: **0.7962** (-0.1%)
-- MRR: 0.8007
+- MRR: 0.7985
 - 상태: ❌ **실패**
 
 **실패 원인:**
@@ -156,7 +156,7 @@
 
 **결과:**
 - MAP: **0.7780** (-2.4%)
-- MRR: 0.7829
+- MRR: 0.7818
 - 상태: ❌ **실패**
 
 **실패 원인:**
@@ -766,13 +766,13 @@ VOTING_WEIGHTS = [6, 3, 1]  # ⭐ 전역 최적값 (95% 확신도)
 
 ### A. BASELINE(1) 상세 로그
 - MAP: 0.6629
-- MRR: 0.6659
+- MRR: 0.6712
 - 실행 일자: 2025-12-XX
 - 평가 질문 수: 220
 
 ### B. Phase 1 (Reranker) 상세 로그
 - MAP: 0.7742 (+16.8%)
-- MRR: 0.7796
+- MRR: 0.7773
 - Reranker 모델: BAAI/bge-reranker-v2-m3
 - Batch Size: 32
 
