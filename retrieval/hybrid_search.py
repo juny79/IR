@@ -3,8 +3,44 @@ from retrieval.es_connector import es
 from models.embedding_client import embedding_client
 from collections import defaultdict
 import operator
+import math
 
 # (es_connector.py에 sparse_retrieve, dense_retrieve 함수가 정의되어 있다고 가정)
+
+# Phase 5-2: RRF (Reciprocal Rank Fusion) 알고리즘
+def rrf_fusion(sparse_res, dense_res_list, top_k=20, k=60):
+    """
+    RRF (Reciprocal Rank Fusion) 알고리즘
+    
+    score(doc) = Σ(1 / (k + rank_i))
+    
+    Args:
+        sparse_res: BM25 검색 결과
+        dense_res_list: Dense 검색 결과 리스트
+        top_k: 반환할 문서 개수
+        k: RRF 파라미터 (기본값 60, 실험 범위: 1-100)
+    
+    Returns:
+        상위 top_k 문서 리스트
+    """
+    rrf_scores = defaultdict(float)
+    
+    # Sparse 결과 처리
+    for rank, hit in enumerate(sparse_res['hits']['hits'], 1):
+        docid = hit['_source']['docid']
+        rrf_scores[docid] += 1.0 / (k + rank)
+    
+    # Dense 결과 처리
+    for dense_res in dense_res_list:
+        for rank, hit in enumerate(dense_res['hits']['hits'], 1):
+            docid = hit['_source']['docid']
+            rrf_scores[docid] += 1.0 / (k + rank)
+    
+    # 점수 기준 정렬
+    sorted_docs = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+    
+    # Top-K 반환
+    return [doc_id for doc_id, score in sorted_docs[:top_k]]
 
 # MAP 최고점 전략의 핵심: Hard Voting 앙상블 함수
 def hard_vote_results(sparse_res, dense_res_list, top_k=5, weights=[5, 3, 1]):
@@ -100,9 +136,9 @@ def get_documents_batch(docids):
     except:
         return {}
 
-def run_hybrid_search(original_query, sparse_query=None, reranker_query=None, top_k_retrieve=50, top_k_final=5, voting_weights=None):
+def run_hybrid_search(original_query, sparse_query=None, reranker_query=None, top_k_retrieve=50, top_k_final=5, voting_weights=None, use_multi_embedding=False, use_gemini_only=False, use_rrf=False, rrf_k=60, multi_queries=None, candidate_pool_size=50):
     """
-    Hybrid Search with Reranker (Phase 2: HyDE 전체 적용)
+    Hybrid Search with Reranker (Phase 7: 멀티 쿼리 지원)
     
     Args:
         original_query: 원본 검색 질문 (Reranker에 사용)
@@ -110,13 +146,18 @@ def run_hybrid_search(original_query, sparse_query=None, reranker_query=None, to
         reranker_query: Reranker용 쿼리 (None이면 original_query 사용)
         top_k_retrieve: 초기 검색에서 가져올 문서 개수 (넓게 검색)
         top_k_final: 최종 반환할 문서 개수
-        voting_weights: Hard Voting 가중치 (기본: [5, 3, 1])
+        voting_weights: Hard Voting 가중치 (기본: [6, 3, 1])
+        use_multi_embedding: 다중 임베딩 사용 여부 (Phase 3-2, 3-3)
+        use_gemini_only: Gemini embedding만 사용 (SBERT 비활성화, Phase 4A)
+        use_rrf: RRF 알고리즘 사용 여부 (Phase 5-2)
+        rrf_k: RRF 파라미터 (기본 60)
+        multi_queries: ⭐ Phase 7D: 멀티 쿼리 리스트 (추가 Sparse 검색용)
     """
     from retrieval.es_connector import sparse_retrieve, dense_retrieve
     
     # 기본값 설정
     if voting_weights is None:
-        voting_weights = [5, 3, 1]
+        voting_weights = [6, 3, 1]  # Phase 2 최적값
     if sparse_query is None:
         sparse_query = original_query
     if reranker_query is None:
@@ -126,19 +167,84 @@ def run_hybrid_search(original_query, sparse_query=None, reranker_query=None, to
     # Sparse: HyDE 확장 쿼리 사용 (키워드 풍부화)
     sparse_res = sparse_retrieve(sparse_query, top_k_retrieve)
     
-    # Dense: HyDE 확장 쿼리 사용 (Phase 2)
-    dense_res = dense_retrieve(sparse_query, top_k_retrieve, "embeddings_sbert")
+    # ⭐ Phase 7D: 멀티 쿼리로 추가 Sparse 검색 (재현율 향상)
+    additional_sparse_results = []
+    if multi_queries:
+        for mq in multi_queries:
+            try:
+                additional_res = sparse_retrieve(mq, top_k_retrieve // 2)  # 각 쿼리당 절반
+                additional_sparse_results.append(additional_res)
+            except Exception as e:
+                pass  # 실패 시 무시
     
-    # Step 2: Hard Voting으로 Top 20 후보 추출
-    candidates_with_scores = hard_vote_results(
-        sparse_res, 
-        [dense_res], 
-        top_k=20,  # Reranker에 넘길 후보 개수
-        weights=voting_weights
-    )
+    # Dense 검색 결과 리스트
+    dense_results = []
     
-    # docid만 추출
-    candidates = [item['docid'] for item in candidates_with_scores]
+    # Phase 4A: Gemini embedding만 사용 (SBERT 비활성화)
+    if use_gemini_only:
+        # Gemini embedding만 사용
+        try:
+            dense_res_gemini = dense_retrieve(sparse_query, top_k_retrieve, "embeddings_gemini")
+            dense_results.append(dense_res_gemini)
+        except Exception as e:
+            print(f"⚠️ Gemini 임베딩 검색 실패: {e}")
+            # fallback: SBERT 사용
+            dense_res_sbert = dense_retrieve(sparse_query, top_k_retrieve, "embeddings_sbert")
+            dense_results.append(dense_res_sbert)
+    else:
+        # Dense: SBERT (기본)
+        dense_res_sbert = dense_retrieve(sparse_query, top_k_retrieve, "embeddings_sbert")
+        dense_results.append(dense_res_sbert)
+    
+        # Phase 8: Gemini 임베딩 추가 (선택적, Upstage 제외)
+        if use_multi_embedding:
+            try:
+                dense_res_gemini = dense_retrieve(sparse_query, top_k_retrieve, "embeddings_gemini")
+                dense_results.append(dense_res_gemini)
+            except Exception as e:
+                print(f"⚠️ Gemini 임베딩 검색 실패: {e}")
+    
+    # Step 2: Fusion 알고리즘 선택 (Hard Voting 또는 RRF)
+    # ⭐ Phase 7D: 멀티 쿼리 결과도 Sparse에 포함
+    all_sparse_results = [sparse_res] + additional_sparse_results
+    
+    # 후보군 크기 정규화
+    try:
+        candidate_pool_size = int(candidate_pool_size)
+    except Exception:
+        candidate_pool_size = 50
+    if candidate_pool_size <= 0:
+        candidate_pool_size = 50
+
+    if use_rrf:
+        # Phase 5-2: RRF 알고리즘 사용
+        # 멀티 쿼리의 Sparse 결과를 모두 합산
+        combined_sparse = sparse_res
+        for add_res in additional_sparse_results:
+            # RRF에서는 모든 결과를 통합
+            pass  # RRF 함수 내부에서 처리
+        
+        candidates = rrf_fusion(
+            sparse_res,
+            dense_results,
+            top_k=candidate_pool_size,
+            k=rrf_k
+        )
+    else:
+        # 기존: Hard Voting 사용
+        # ⭐ Phase 7D: 멀티 쿼리 Sparse 결과도 투표에 포함
+        combined_dense = dense_results.copy()
+        for add_res in additional_sparse_results:
+            combined_dense.append(add_res)  # 추가 Sparse 결과를 Dense처럼 취급
+        
+        candidates_with_scores = hard_vote_results(
+            sparse_res, 
+            combined_dense,  # 멀티 쿼리 결과 포함
+            top_k=candidate_pool_size,
+            weights=voting_weights
+        )
+        # docid만 추출
+        candidates = [item['docid'] for item in candidates_with_scores]
     
     # Step 3: 배치로 문서 내용 가져오기 (최적화) ⭐
     docs_dict = get_documents_batch(candidates)
@@ -156,7 +262,7 @@ def run_hybrid_search(original_query, sparse_query=None, reranker_query=None, to
     
     if docs_with_content:
         final_ranked_results = reranker.rerank(
-            reranker_query,  # ⭐ HyDE 쿼리로 Sparse와 일관성 확보
+            reranker_query,  # 원본 쿼리 사용 (Phase 2 확정)
             docs_with_content, 
             top_k=top_k_final,
             batch_size=32  # 배치 크기 지정

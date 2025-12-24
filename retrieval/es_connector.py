@@ -29,9 +29,27 @@ def sparse_retrieve(query_str, size=10):
     return es.search(index="test", query=query, size=size)
 
 def dense_retrieve(query_str, size=10, embedding_field="embeddings_sbert"):
-    """벡터 기반 KNN 검색"""
+    """
+    벡터 기반 KNN 검색 (Phase 3: 다중 임베딩 지원)
+    
+    Args:
+        query_str: 검색 쿼리
+        size: 반환할 문서 개수
+        embedding_field: 검색할 임베딩 필드
+            - "embeddings_sbert": SBERT (기본)
+            - "embeddings_upstage": Upstage Solar
+            - "embeddings_gemini": Gemini
+    """
+    # 임베딩 필드에 맞는 모델 선택
+    if embedding_field == "embeddings_upstage":
+        model_name = "upstage"
+    elif embedding_field == "embeddings_gemini":
+        model_name = "gemini"
+    else:
+        model_name = "sbert"
+    
     # 쿼리를 벡터로 변환 (embedding_client 활용)
-    query_embedding = embedding_client.get_query_embedding(query_str, model_name="sbert").tolist()
+    query_embedding = embedding_client.get_query_embedding(query_str, model_name=model_name).tolist()
 
     # KNN 검색 쿼리 구성
     knn = {

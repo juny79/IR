@@ -16,11 +16,40 @@ class LLMClient:
         genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel(model_name)
         
-        # MAP 극대화용 프롬프트
+        # Phase 8: 게이팅 정밀도 향상 프롬프트 (Chain of Thought + 신뢰도)
         self.persona_query = """
-        ## Role: 과학 상식 전문가
-        - 과학 질문이면 'search' 도구를 호출하여 'standalone_query'를 생성하라.
-        - 일상 인사나 비과학 질문이면 도구를 호출하지 말고 직접 답하라. (MAP 확보 핵심)
+## Role: 과학 지식 질문 분류 전문가
+
+당신의 임무는 사용자의 질문이 "전문 과학 지식 검색이 필요한 질문"인지 정확히 판단하는 것입니다.
+
+## 판단 기준
+
+### 과학 지식 질문 (search 도구 호출 필요) ✅
+- 과학적 개념, 원리, 현상에 대한 설명 요구
+- 생물학, 화학, 물리학, 지구과학 등 전문 용어 포함
+- 학술적이고 객관적인 문체
+- 예시:
+  * "광합성의 과정은 어떻게 되나요?"
+  * "DNA의 이중나선 구조를 설명해주세요"
+  * "뉴턴의 제3법칙이란?"
+  * "미토콘드리아의 역할은?"
+
+### 일상 대화 (search 도구 호출 불필요) ❌
+- 인사, 감정 표현, 의견 문의
+- 일상적 대화, 주관적 질문
+- 감성적이고 개인적인 문체
+- 예시:
+  * "안녕하세요"
+  * "오늘 날씨 어때요?"
+  * "기분이 좋아요"
+  * "뭐 하고 있어?"
+
+## 분석 절차 (Chain of Thought)
+1. 질문에 과학 전문 용어가 있는가?
+2. 객관적 설명/정보를 요구하는가?
+3. 학술적 맥락인가?
+
+위 3가지 중 2개 이상 해당하면 과학 질문입니다.
         """
         
     def _call_with_retry(self, func, *args, max_retries=15, initial_wait=5, **kwargs):
@@ -37,13 +66,43 @@ class LLMClient:
         return None
 
     def analyze_query(self, messages):
+        # Phase 8: Chain of Thought + 신뢰도 점수 추가
         tools = [{"function_declarations": [{
             "name": "search",
-            "description": "과학 지식 검색",
-            "parameters": {"type": "OBJECT", "properties": {"standalone_query": {"type": "STRING"}}, "required": ["standalone_query"]}
+            "description": "과학 지식 데이터베이스 검색 (전문적이고 객관적인 과학 지식이 필요할 때만 사용)",
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "rationale": {
+                        "type": "STRING",
+                        "description": "이 질문이 과학 지식 검색이 필요한 이유 (사고 과정)"
+                    },
+                    "standalone_query": {
+                        "type": "STRING",
+                        "description": "검색에 최적화된 독립적 과학 질문"
+                    },
+                    "confidence": {
+                        "type": "NUMBER",
+                        "description": "과학 지식 질문일 확률 (0.0~1.0, 0.7 이상일 때만 검색 권장)"
+                    }
+                },
+                "required": ["rationale", "standalone_query", "confidence"]
+            }
         }]}]
         
-        response = self._call_with_retry(self.model.generate_content, str(messages), tools=tools)
+        # Few-shot 예시를 포함한 프롬프트 생성
+        prompt = f"""{self.persona_query}
+
+## 사용자 질문
+{str(messages)}
+
+## 지침
+- 과학 질문이면 search 도구를 호출하세요 (rationale, standalone_query, confidence 모두 필수)
+- 일상 대화면 도구를 호출하지 말고 친절하게 직접 답하세요
+- confidence는 0.0~1.0 사이 값으로, 확신이 없으면 낮게 설정하세요
+"""
+        
+        response = self._call_with_retry(self.model.generate_content, prompt, tools=tools)
         
         # OpenAI 호환 스타일로 변환하여 반환
         class MockCall:

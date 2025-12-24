@@ -1,21 +1,32 @@
 import json
+import os
 from eval_rag import answer_question_optimized
 
 def main():
+    submission_file = os.getenv("SUBMISSION_FILE", "submission.csv")
+    eval_file = os.getenv("EVAL_FILE", "./data/eval.jsonl")
+    # 0이면 전체(220) 처리, 양수면 앞에서부터 N개만 처리(빠른 드라이런/프리필터용)
+    try:
+        eval_limit = int(os.getenv("EVAL_LIMIT", "0"))
+    except Exception:
+        eval_limit = 0
+
     # 이미 처리된 eval_id들 로드
     processed_ids = set()
     try:
-        with open("./submission.csv", "r", encoding="utf-8") as f:
+        with open(submission_file, "r", encoding="utf-8") as f:
             for line in f:
                 data = json.loads(line)
                 processed_ids.add(data["eval_id"])
     except:
         pass
     
-    with open("./data/eval.jsonl", "r", encoding="utf-8") as f, \
-         open("submission.csv", "a", encoding="utf-8") as of:
+    with open(eval_file, "r", encoding="utf-8") as f, \
+         open(submission_file, "a", encoding="utf-8") as of:
         
         for i, line in enumerate(f, 1):
+            if eval_limit and i > eval_limit:
+                break
             data = json.loads(line)
             
             # 이미 처리된 항목은 건너뛰기
