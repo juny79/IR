@@ -11,24 +11,30 @@ import time
 import requests
 import pickle
 import hashlib
+import json
 from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
 
 class SolarClient:
-    def __init__(self, model_name="solar-pro"):
+    def __init__(self, model_name=None):
         """
         Solar-pro2 클라이언트 초기화 (HyDE 캐싱 포함)
         
         Args:
-            model_name: "solar-pro" (Upstage의 최신 모델)
+            model_name: Upstage Solar 모델 ID. None이면 환경변수/기본값 사용.
+                - SOLAR_MODEL_ID env가 설정되어 있으면 그 값을 사용
+                - 아니면 기본값 "solar-pro" 사용
         """
         self.api_key = os.getenv("UPSTAGE_API_KEY")
         if not self.api_key:
             raise ValueError("UPSTAGE_API_KEY가 .env 파일에 없습니다.")
         
         self.api_url = "https://api.upstage.ai/v1/solar/chat/completions"
+
+        if model_name is None:
+            model_name = os.getenv("SOLAR_MODEL_ID") or "solar-pro"
         self.model = model_name
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -63,32 +69,37 @@ class SolarClient:
         """HyDE 캐시 키 생성"""
         return hashlib.md5(query.encode()).hexdigest()
     
-    def _call_with_retry(self, prompt, max_retries=5, initial_wait=2, temperature=0.3, max_tokens=300):
+    def _call_with_retry(self, prompt, max_retries=5, initial_wait=2, temperature=0.3, max_tokens=300, response_format=None, use_cache=True):
         """
         Rate Limit 및 오류 처리를 위한 재시도 로직
-        
-        Args:
-            prompt: 프롬프트 텍스트
-            max_retries: 최대 재시도 횟수
-            initial_wait: 초기 대기 시간(초)
-            
-        Returns:
-            API 응답 텍스트
         """
+        if isinstance(prompt, list):
+            messages = prompt
+        else:
+            messages = [{"role": "user", "content": prompt}]
+
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        }
+        if response_format:
+            payload["response_format"] = response_format
+
+        # 일반 호출 캐싱 추가
+        cache_key = hashlib.md5(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        cache_path = self.cache_dir / f"solar_{cache_key}.json"
+
+        if use_cache and cache_path.exists():
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    return json.load(f)["content"]
+            except:
+                pass
+
         for i in range(max_retries):
             try:
-                payload = {
-                    "model": self.model,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ],
-                    "temperature": temperature,
-                    "max_tokens": max_tokens
-                }
-                
                 response = requests.post(
                     self.api_url,
                     headers=self.headers,
@@ -98,7 +109,13 @@ class SolarClient:
                 
                 if response.status_code == 200:
                     result = response.json()
-                    return result['choices'][0]['message']['content']
+                    content = result['choices'][0]['message']['content']
+                    
+                    if use_cache:
+                        with open(cache_path, "w", encoding="utf-8") as f:
+                            json.dump({"payload": payload, "content": content}, f, ensure_ascii=False, indent=2)
+                    
+                    return content
                 elif response.status_code == 429:
                     # Rate Limit
                     wait = initial_wait * (2 ** i)
@@ -252,56 +269,52 @@ class SolarClient:
             return self.analyze_cache[cache_key]
 
         # Few-shot + 엄격 JSON 출력 유도
-        prompt = f"""당신은 '검색 필요 여부 판단 + 검색용 독립쿼리 정규화 + HyDE(가설 문서)' 생성기입니다.
+        # 목표: 대회 기준 "검색 불필요"(일상 대화/감정/인사/잡담/AI 메타/의견) 케이스를 더 잘 잡아 topk=[]로 반환.
+        prompt = f"""당신은 '의도(intent) 분류 + 검색 필요 여부 판단 + 검색용 독립쿼리 정규화 + HyDE(가설 문서)' 생성기입니다.
 
-    아래 대화를 보고, 마지막 사용자 질문이 "문서 검색(코퍼스 기반 답변)이 필요한 지식/설명/정보 질문"인지 판단하세요.
+아래 대화를 보고, 마지막 사용자 발화가 "과학/기술/지식에 대한 객관적 설명을 위해 문서 검색이 필요한 질문"인지 판단하세요.
 
-    중요: 이 프로젝트의 코퍼스는 과학에만 한정되지 않을 수 있으므로, 역사/사회/기술/프로그래밍/상식 등 '설명형 지식 질문'은 기본적으로 검색 대상으로 분류하세요.
-규칙:
-- is_science=false이면(=검색 불필요):
+의도(intent) 라벨:
+- science_knowledge: 과학/기술 개념/원리/현상/정의/비교/메커니즘 등 객관적 설명 요구
+- chitchat: 인사/감정/농담/칭찬/잡담/관계 대화
+- assistant_meta: "너는 누구야", "할 수 있어?" 같은 AI 자체/기능 질문
+- opinion: 주관적 의견/선호/추천(코퍼스 근거 없이도 답 가능한 형태)
+- other: 그 외
 
-출력 스키마:
+출력은 반드시 JSON 1개만. (추가 텍스트/코드블록 금지)
+
+스키마:
 {{
-- is_science=true이면(=검색 필요):
-  \"confidence\": 0.0~1.0,
-  \"standalone_query\": \"...\", 
-  \"hyde\": \"...\", 
-  \"direct_answer\": \"...\"
+    "intent": "science_knowledge|chitchat|assistant_meta|opinion|other",
+    "is_science": true/false,
+    "confidence": 0.0~1.0,
+    "standalone_query": "...",
+    "hyde": "...",
+    "direct_answer": "..."
 }}
 
 규칙:
-- is_science=false이면:
-  - standalone_query는 원문 질문을 그대로 넣기
-  - hyde는 빈 문자열
-  - direct_answer는 1~2문장 짧은 친절 답변
-- is_science=true이면:
-  - standalone_query는 검색에 적합한 과학 질문(불필요한 감탄/잡담 제거)
-  - hyde는 {hyde_max_chars}자 이내, 백과사전 스타일 150~{hyde_max_chars}자, 핵심 개념/전문용어/동의어 포함
-  - direct_answer는 빈 문자열
+- is_science=false(=검색 불필요)인 경우:
+    - standalone_query: 원문 질문 그대로
+    - hyde: ""
+    - direct_answer: 1~2문장 짧고 친절한 답
+- is_science=true(=검색 필요)인 경우:
+    - standalone_query: 검색에 적합하게 정규화(불필요한 감탄/잡담 제거)
+    - hyde: {hyde_max_chars}자 이내, 백과사전 스타일 150~{hyde_max_chars}자, 핵심 개념/전문용어/동의어 포함
+    - direct_answer: ""
 
-판단 예시:
-Q: "너 정말 똑똑하다!"
-A: {{"is_science": false, "confidence": 0.95, "standalone_query": "너 정말 똑똑하다!", "hyde": "", "direct_answer": "고마워요! 무엇을 도와드릴까요?"}}
+예시:
+입력: "안녕 ㅋㅋ"
+출력: {{"intent":"chitchat","is_science":false,"confidence":0.95,"standalone_query":"안녕 ㅋㅋ","hyde":"","direct_answer":"안녕하세요! 무엇을 도와드릴까요?"}}
 
-Q: "오늘 날씨 어때?"
-A: {{"is_science": false, "confidence": 0.9, "standalone_query": "오늘 날씨 어때?", "hyde": "", "direct_answer": "제가 실시간 날씨는 확인할 수 없지만, 지역을 알려주면 일반적인 확인 방법을 안내할게요."}}
+입력: "너는 누구야?"
+출력: {{"intent":"assistant_meta","is_science":false,"confidence":0.9,"standalone_query":"너는 누구야?","hyde":"","direct_answer":"저는 질문에 답하고 정보를 정리해드리는 AI 어시스턴트예요."}}
 
-Q: "python에서 lambda 함수를 언제 사용할 수 있어?"
-A: {{"is_science": true, "confidence": 0.85, "standalone_query": "Python에서 lambda(익명 함수)를 언제/어떤 상황에서 사용하는가?", "hyde": "(150~{hyde_max_chars}자 내 기술 설명)", "direct_answer": ""}}
-
-Q: "나이와 코호트 차이를 다 고려하는 디자인 방식은?"
-A: {{"is_science": true, "confidence": 0.8, "standalone_query": "나이 효과와 코호트 효과를 함께 고려하는 연구/분석/설계 방법론은 무엇인가?", "hyde": "(150~{hyde_max_chars}자 내 설명)", "direct_answer": ""}}
-
-Q: "광합성이란?"
-A: {{"is_science": true, "confidence": 0.9, "standalone_query": "광합성의 정의와 과정은 무엇인가?", "hyde": "(150~{hyde_max_chars}자 내 과학 설명)", "direct_answer": ""}}
-
-Q: "식물 높이 성장 메커니즘"
-A: {{"is_science": true, "confidence": 0.85, "standalone_query": "식물의 키(높이) 성장을 조절하는 생리학적 메커니즘은 무엇인가?", "hyde": "(150~{hyde_max_chars}자 내 과학 설명)", "direct_answer": ""}}
+입력: "광합성이 뭐야?"
+출력: {{"intent":"science_knowledge","is_science":true,"confidence":0.9,"standalone_query":"광합성의 정의와 과정은 무엇인가?","hyde":"(150~{hyde_max_chars}자 내 과학 설명)","direct_answer":""}}
 
 중요:
-- 아래에는 단일 문장이 아니라 '대화 전체'가 주어질 수 있습니다.
-- 마지막 사용자 발화가 "그 이유가 뭐야?" 처럼 짧더라도, 이전 맥락이 과학 주제면 과학 질문으로 분류하세요.
-- standalone_query는 반드시 '대화 맥락을 반영'해 독립적으로 완성된 질문으로 만드세요.
+- 마지막 발화가 짧아도 이전 대화 맥락이 과학 주제면 science_knowledge로 분류하세요.
 
 대화:
 {conversation_text}
@@ -333,15 +346,25 @@ A: {{"is_science": true, "confidence": 0.85, "standalone_query": "식물의 키(
             # - 명백한 일상 대화만 비과학 처리
             # - 그 외는 과학으로 처리(과학 질문을 비과학으로 놓쳐 topk=[] 되는 것을 방지)
             non_science_markers = [
-                "안녕", "반가", "고마", "감사", "사랑", "좋아", "싫어", "힘들", "우울", "기분",
-                "날씨", "오늘", "내일", "밥", "뭐해", "그만", "ㅋㅋ", "ㅎㅎ",
+                # greetings / chit-chat
+                "안녕", "반가", "잘 지내", "좋은 아침", "좋은밤", "잘자",
+                # thanks / compliment
+                "고마", "감사", "땡큐", "최고", "대단", "멋지",
+                # emotions
+                "힘들", "우울", "기분", "짜증", "행복", "슬퍼",
+                # daily-life
+                "날씨", "오늘", "내일", "밥", "점심", "저녁", "뭐해",
+                # laughter / slang
+                "ㅋㅋ", "ㅎㅎ", "ㄷㄷ", "ㅇㅇ",
+                # assistant meta
+                "너는 누구", "넌 누구", "할 수 있어", "할수있어", "가능해",
             ]
             is_clearly_non_science = any(m in (last_user_text or "") for m in non_science_markers)
 
             if is_clearly_non_science:
                 parsed = {
                     "is_science": False,
-                    "confidence": 0.0,
+                    "confidence": 0.95,
                     "standalone_query": last_user_text,
                     "hyde": "",
                     "direct_answer": "질문을 조금 더 구체적으로 알려주시면 도와드릴게요."
@@ -357,11 +380,13 @@ A: {{"is_science": true, "confidence": 0.85, "standalone_query": "식물의 키(
 
         # 필드 정규화
         try:
+            parsed.setdefault("intent", "other")
             parsed.setdefault("is_science", False)
             parsed.setdefault("confidence", 0.0)
             parsed.setdefault("standalone_query", last_user_text)
             parsed.setdefault("hyde", "")
             parsed.setdefault("direct_answer", "")
+            parsed["intent"] = str(parsed.get("intent") or "other").strip()
             parsed["confidence"] = float(parsed["confidence"]) if parsed["confidence"] is not None else 0.0
             parsed["standalone_query"] = str(parsed["standalone_query"] or last_user_text).strip()
             parsed["hyde"] = str(parsed["hyde"] or "").strip()
@@ -454,17 +479,27 @@ A: {{"is_science": true, "confidence": 0.85, "standalone_query": "식물의 키(
     def generate_multi_query(self, query):
         """
         ⭐ Phase 7D: 멀티 쿼리 생성 (Query Expansion)
-        단일 가설 답변 대신 3가지 핵심 키워드 조합 생성
+        단일 가설 답변 대신 여러 개의 검색용 쿼리 변형을 생성
         BM25 Sparse 검색의 재현율(Recall) 향상
         
         Args:
             query: 원본 검색 질문
             
+        환경변수:
+            - MULTI_QUERY_COUNT: 생성할 쿼리 개수 (기본 3, 최대 6)
+
         Returns:
-            list: 3가지 검색 쿼리 리스트
+            list: 검색 쿼리 리스트
         """
-        # 캐시 키 생성
-        cache_key = f"multi_{hashlib.md5(query.encode()).hexdigest()}"
+        # 생성 개수(실험 레버)
+        try:
+            n = int(os.getenv("MULTI_QUERY_COUNT", "3"))
+        except Exception:
+            n = 3
+        n = max(1, min(6, n))
+
+        # 캐시 키 생성 (개수/프롬프트 버전 포함)
+        cache_key = f"multi_v2_{n}_{hashlib.md5(query.encode()).hexdigest()}"
         
         if not hasattr(self, 'multi_query_cache'):
             self.multi_query_cache = {}
@@ -472,44 +507,79 @@ A: {{"is_science": true, "confidence": 0.85, "standalone_query": "식물의 키(
         if cache_key in self.multi_query_cache:
             return self.multi_query_cache[cache_key]
         
-        prompt = f"""당신은 검색 쿼리 최적화 전문가입니다. 다음 질문에 대해 검색 성능을 높이는 3가지 핵심 키워드 조합을 생성하세요.
+        prompt = f"""당신은 검색 쿼리 최적화 전문가입니다.
+    다음 질문에 대해 BM25 검색 재현율을 높이는 '검색용 쿼리 변형'을 {n}개 생성하세요.
 
-## 요구사항
-1. 각 키워드 조합은 3-5개 단어로 구성
-2. 전문 용어, 동의어, 관련 개념 포함
-3. 질문의 다른 측면을 반영
+    ## 생성 규칙
+    - 각 쿼리는 3~12개의 핵심 토큰(단어/구)로 구성 (문장형이어도 괜찮지만 군더더기 없이)
+    - 원문의 의미를 유지하되, 서로 다른 관점/표현으로 다양화
+    - 가능한 경우 다음 요소를 분산 포함:
+      1) 핵심 전문용어(정의/원리)
+      2) 동의어/유사어/대체 표기
+      3) 관련 개념/메커니즘/원인-결과
+      4) 영문 용어(가능하면 괄호로 병기)
+    - 너무 일반적인 단어만 나열하지 말 것(예: "설명", "방법")
 
-## 질문
-{query}
+    ## 질문
+    {query}
 
-## 응답 형식
-1. [키워드 조합 1]
-2. [키워드 조합 2]
-3. [키워드 조합 3]
-
-응답:"""
+    ## 출력 형식(JSON만)
+    {{"queries": ["...", "...", "..."]}}
+    """
         
         try:
             result = self._call_with_retry(prompt, max_retries=2)
             
             if result:
                 result = result.strip()
-                # 키워드 조합 파싱
-                queries = []
-                lines = result.split('\n')
-                for line in lines:
-                    line = line.strip()
-                    if line and (line.startswith('1.') or line.startswith('2.') or line.startswith('3.')):
-                        # 번호 제거
-                        q = line[2:].strip().strip('[]').strip()
-                        if q:
+
+                # JSON 우선 파싱
+                try:
+                    json_str = result
+                    if '```json' in json_str:
+                        json_str = json_str.split('```json', 1)[1].split('```', 1)[0]
+                    elif '```' in json_str:
+                        json_str = json_str.split('```', 1)[1].split('```', 1)[0]
+
+                    parsed = json.loads(json_str.strip())
+                    cand = parsed.get('queries') if isinstance(parsed, dict) else None
+                    queries = []
+                    if isinstance(cand, list):
+                        for q in cand:
+                            if not isinstance(q, str):
+                                continue
+                            q = q.strip()
+                            if not q:
+                                continue
                             queries.append(q)
-                
-                # 최소 1개 이상이면 캐시 저장
-                if queries:
-                    self.multi_query_cache[cache_key] = queries[:3]  # 최대 3개
-                    return queries[:3]
-            
+                except Exception:
+                    # 레거시 텍스트 파싱 fallback
+                    queries = []
+                    for line in result.split('\n'):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if line[0].isdigit() and line[1:2] == '.':
+                            q = line[2:].strip().strip('[]').strip()
+                            if q:
+                                queries.append(q)
+
+                # 후처리: 중복 제거 + 길이/공백 정리
+                uniq = []
+                seen = set()
+                for q in queries:
+                    norm = ' '.join(q.split())
+                    key = norm.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    uniq.append(norm)
+
+                if uniq:
+                    uniq = uniq[:n]
+                    self.multi_query_cache[cache_key] = uniq
+                    return uniq
+
             return [query]  # 실패 시 원본 쿼리만 반환
             
         except Exception as e:

@@ -52,6 +52,10 @@ class EmbeddingClient:
             with open(self.cache_file, 'wb') as f:
                 pickle.dump(self.cache, f)
         except Exception as e:
+            # Interpreter shutdown 시점에는 builtins/open 등이 정리되며 NameError가 날 수 있음.
+            # 이 경우는 무해하므로 로그를 남기지 않는다.
+            if isinstance(e, NameError) and "open" in str(e):
+                return
             print(f"⚠️ 캐시 저장 실패: {e}")
     
     def _get_cache_key(self, query, model_name):
@@ -165,6 +169,11 @@ class EmbeddingClient:
     
     def __del__(self):
         """객체 소멸 시 캐시 저장"""
-        self._save_cache()
+        try:
+            # Interpreter shutdown 단계에서는 builtins/open 등이 정리되어 NameError가 날 수 있음.
+            # 종료 시점 에러 로그를 남기지 않기 위해 조용히 무시한다.
+            self._save_cache()
+        except Exception:
+            pass
 
 embedding_client = EmbeddingClient()

@@ -37,11 +37,11 @@ def dense_retrieve(query_str, size=10, embedding_field="embeddings_sbert"):
         size: 반환할 문서 개수
         embedding_field: 검색할 임베딩 필드
             - "embeddings_sbert": SBERT (기본)
-            - "embeddings_upstage": Upstage Solar
+            - "embeddings_upstage_2048": Upstage Solar (4096 -> 2048 trunc + L2 norm)
             - "embeddings_gemini": Gemini
     """
     # 임베딩 필드에 맞는 모델 선택
-    if embedding_field == "embeddings_upstage":
+    if embedding_field == "embeddings_upstage_2048":
         model_name = "upstage"
     elif embedding_field == "embeddings_gemini":
         model_name = "gemini"
@@ -51,12 +51,25 @@ def dense_retrieve(query_str, size=10, embedding_field="embeddings_sbert"):
     # 쿼리를 벡터로 변환 (embedding_client 활용)
     query_embedding = embedding_client.get_query_embedding(query_str, model_name=model_name).tolist()
 
+    # ES dense_vector dims 제한(<=2048) 대응: Upstage(4096) 벡터는 앞 2048 dims를 사용하고 L2 normalize
+    if embedding_field == "embeddings_upstage_2048":
+        if len(query_embedding) > 2048:
+            query_embedding = query_embedding[:2048]
+        # L2 normalize (cosine similarity에 유리)
+        norm = sum(x * x for x in query_embedding) ** 0.5
+        if norm > 0:
+            query_embedding = [x / norm for x in query_embedding]
+
     # KNN 검색 쿼리 구성
+    # Elasticsearch KNN은 일반적으로 num_candidates >= k 를 요구합니다.
+    # TOP_K_RETRIEVE 등을 키웠을 때 쿼리가 깨지지 않도록 자동 보정합니다.
+    default_num_candidates = int(os.getenv("ES_NUM_CANDIDATES", "100"))
+    num_candidates = max(int(size), default_num_candidates)
     knn = {
         "field": embedding_field,
         "query_vector": query_embedding,
-        "k": size,
-        "num_candidates": 100
+        "k": int(size),
+        "num_candidates": num_candidates,
     }
 
     # 검색 실행

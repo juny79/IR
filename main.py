@@ -2,7 +2,27 @@ import json
 import os
 from eval_rag import answer_question_optimized
 
+
+def _selected_gemini_model_id() -> str:
+    """Gemini LLM 모델 ID는 환경변수로 오버라이드되며, 없으면 기본값을 사용."""
+    return os.getenv("GEMINI_MODEL_ID") or "models/gemini-3-flash-preview"
+
+
+def _print_model_config_once():
+    """실행 시점의 모델 설정을 한 번만 출력 (키/토큰 등 민감정보는 출력 금지)."""
+    gemini_env = os.getenv("GEMINI_MODEL_ID")
+    gemini_selected = _selected_gemini_model_id()
+    print(f"[Model] Gemini model id: {gemini_selected} (GEMINI_MODEL_ID={'<unset>' if not gemini_env else gemini_env})")
+
+    # Solar은 eval_rag에서 이미 사용되므로, 실제 인스턴스의 모델 문자열을 그대로 표시
+    try:
+        from models.solar_client import solar_client
+        print(f"[Model] Solar model id: {getattr(solar_client, 'model', '<unknown>')}")
+    except Exception as e:
+        print(f"[Model] Solar model id: <unavailable> ({str(e)[:80]})")
+
 def main():
+    _print_model_config_once()
     submission_file = os.getenv("SUBMISSION_FILE", "submission.csv")
     eval_file = os.getenv("EVAL_FILE", "./data/eval.jsonl")
     # 0이면 전체(220) 처리, 양수면 앞에서부터 N개만 처리(빠른 드라이런/프리필터용)

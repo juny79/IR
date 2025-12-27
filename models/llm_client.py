@@ -8,10 +8,16 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class LLMClient:
-    def __init__(self, model_name="gemini-2.5-flash"):
+    def __init__(self, model_name=None):
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("GEMINI_API_KEY가 .env 파일에 없습니다.")
+
+        # 기본 모델은 env로 오버라이드 가능
+        # NOTE: google.generativeai SDK에서는 보통 "models/..." 형태의 모델명을 사용.
+        # 예: GEMINI_MODEL_ID=models/gemini-3-flash-preview
+        if model_name is None:
+            model_name = os.getenv("GEMINI_MODEL_ID", "models/gemini-3-flash-preview")
         
         genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel(model_name)
@@ -165,8 +171,5 @@ class LLMClient:
         except Exception as e:
             print(f"HyDE 생성 실패: {e}")
             return ""
-
-llm_client = LLMClient()
-
 
 llm_client = LLMClient()

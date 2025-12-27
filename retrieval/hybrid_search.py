@@ -1,4 +1,5 @@
 import json
+import os
 from retrieval.es_connector import es
 from models.embedding_client import embedding_client
 from collections import defaultdict
@@ -179,30 +180,84 @@ def run_hybrid_search(original_query, sparse_query=None, reranker_query=None, to
     
     # Dense 검색 결과 리스트
     dense_results = []
-    
-    # Phase 4A: Gemini embedding만 사용 (SBERT 비활성화)
-    if use_gemini_only:
-        # Gemini embedding만 사용
+
+    # ✅ 임베딩 다양성(실험): 여러 dense 임베딩 필드 결과를 각각 검색해서 fusion(RRF/HardVote)에 함께 넣기
+    # - 예: DENSE_EMBEDDING_FIELDS=embeddings_sbert,embeddings_gemini,embeddings_upstage_2048
+    # - DENSE_K_PER_FIELD로 각 필드의 k를 별도 지정 가능 (미지정 시 top_k_retrieve 사용)
+    env_dense_fields = os.getenv("DENSE_EMBEDDING_FIELDS", "").strip()
+    env_dense_k_per_field = os.getenv("DENSE_K_PER_FIELD", "").strip()
+    env_dense_k_map = os.getenv("DENSE_K_PER_FIELD_MAP", "").strip()
+    dense_k_per_field = None
+    if env_dense_k_per_field:
         try:
-            dense_res_gemini = dense_retrieve(sparse_query, top_k_retrieve, "embeddings_gemini")
-            dense_results.append(dense_res_gemini)
-        except Exception as e:
-            print(f"⚠️ Gemini 임베딩 검색 실패: {e}")
-            # fallback: SBERT 사용
-            dense_res_sbert = dense_retrieve(sparse_query, top_k_retrieve, "embeddings_sbert")
-            dense_results.append(dense_res_sbert)
-    else:
-        # Dense: SBERT (기본)
-        dense_res_sbert = dense_retrieve(sparse_query, top_k_retrieve, "embeddings_sbert")
-        dense_results.append(dense_res_sbert)
+            dense_k_per_field = int(env_dense_k_per_field)
+        except Exception:
+            dense_k_per_field = None
+    if dense_k_per_field is not None and dense_k_per_field <= 0:
+        dense_k_per_field = None
+    dense_k_map = {}
+    if env_dense_k_map:
+        # format: field1:80,field2:40
+        for part in env_dense_k_map.split(","):
+            part = part.strip()
+            if not part or ":" not in part:
+                continue
+            field, k_str = part.split(":", 1)
+            field = field.strip()
+            k_str = k_str.strip()
+            if not field or not k_str:
+                continue
+            try:
+                k_val = int(k_str)
+            except Exception:
+                continue
+            if k_val > 0:
+                dense_k_map[field] = k_val
+
+    if env_dense_fields:
+        dense_fields = [x.strip() for x in env_dense_fields.split(",") if x.strip()]
+        # 안전장치: 최소 1개는 있어야 함
+        if dense_fields:
+            for field in dense_fields:
+                try:
+                    k_size = dense_k_map.get(field)
+                    if k_size is None:
+                        k_size = dense_k_per_field if dense_k_per_field is not None else top_k_retrieve
+                    dense_results.append(dense_retrieve(sparse_query, k_size, field))
+                except Exception as e:
+                    print(f"⚠️ Dense 임베딩 검색 실패({field}): {e}")
+
+            # env로 지정된 경우는 여기서 Dense 구성을 종료
+            # (아래의 legacy 분기는 기존 실험 재현을 위해 유지)
+        else:
+            # 빈 문자열/파싱 실패 시 기존 로직으로 fallback
+            env_dense_fields = ""
     
-        # Phase 8: Gemini 임베딩 추가 (선택적, Upstage 제외)
-        if use_multi_embedding:
+    # (legacy) env로 dense fields를 지정하지 않은 경우에만 기존 로직 사용
+    if not env_dense_fields:
+        # Phase 4A: Gemini embedding만 사용 (SBERT 비활성화)
+        if use_gemini_only:
+            # Gemini embedding만 사용
             try:
                 dense_res_gemini = dense_retrieve(sparse_query, top_k_retrieve, "embeddings_gemini")
                 dense_results.append(dense_res_gemini)
             except Exception as e:
                 print(f"⚠️ Gemini 임베딩 검색 실패: {e}")
+                # fallback: SBERT 사용
+                dense_res_sbert = dense_retrieve(sparse_query, top_k_retrieve, "embeddings_sbert")
+                dense_results.append(dense_res_sbert)
+        else:
+            # Dense: SBERT (기본)
+            dense_res_sbert = dense_retrieve(sparse_query, top_k_retrieve, "embeddings_sbert")
+            dense_results.append(dense_res_sbert)
+    
+            # Phase 8: Gemini 임베딩 추가 (선택적)
+            if use_multi_embedding:
+                try:
+                    dense_res_gemini = dense_retrieve(sparse_query, top_k_retrieve, "embeddings_gemini")
+                    dense_results.append(dense_res_gemini)
+                except Exception as e:
+                    print(f"⚠️ Gemini 임베딩 검색 실패: {e}")
     
     # Step 2: Fusion 알고리즘 선택 (Hard Voting 또는 RRF)
     # ⭐ Phase 7D: 멀티 쿼리 결과도 Sparse에 포함
@@ -218,15 +273,11 @@ def run_hybrid_search(original_query, sparse_query=None, reranker_query=None, to
 
     if use_rrf:
         # Phase 5-2: RRF 알고리즘 사용
-        # 멀티 쿼리의 Sparse 결과를 모두 합산
-        combined_sparse = sparse_res
-        for add_res in additional_sparse_results:
-            # RRF에서는 모든 결과를 통합
-            pass  # RRF 함수 내부에서 처리
-        
+        # 멀티 쿼리 결과도 RRF에 포함 (동일한 ES hit 스키마)
+        combined_results = dense_results + additional_sparse_results
         candidates = rrf_fusion(
             sparse_res,
-            dense_results,
+            combined_results,
             top_k=candidate_pool_size,
             k=rrf_k
         )
