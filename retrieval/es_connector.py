@@ -39,12 +39,15 @@ def dense_retrieve(query_str, size=10, embedding_field="embeddings_sbert"):
             - "embeddings_sbert": SBERT (기본)
             - "embeddings_upstage_2048": Upstage Solar (4096 -> 2048 trunc + L2 norm)
             - "embeddings_gemini": Gemini
+        - "embeddings_bge_m3_v3": BGE-M3 V3 (Fine-tuned)
     """
     # 임베딩 필드에 맞는 모델 선택
     if embedding_field == "embeddings_upstage_2048":
         model_name = "upstage"
     elif embedding_field == "embeddings_gemini":
         model_name = "gemini"
+    elif embedding_field == "embeddings_bge_m3_v3":
+        model_name = "bge_m3_v3"
     else:
         model_name = "sbert"
     

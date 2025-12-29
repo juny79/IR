@@ -258,6 +258,13 @@ def run_hybrid_search(original_query, sparse_query=None, reranker_query=None, to
                     dense_results.append(dense_res_gemini)
                 except Exception as e:
                     print(f"⚠️ Gemini 임베딩 검색 실패: {e}")
+                
+                # ⭐ Phase 9: 파인튜닝된 BGE-M3 V3 추가
+                try:
+                    dense_res_bge = dense_retrieve(sparse_query, top_k_retrieve, "embeddings_bge_m3_v3")
+                    dense_results.append(dense_res_bge)
+                except Exception as e:
+                    print(f"⚠️ BGE-M3 V3 임베딩 검색 실패: {e}")
     
     # Step 2: Fusion 알고리즘 선택 (Hard Voting 또는 RRF)
     # ⭐ Phase 7D: 멀티 쿼리 결과도 Sparse에 포함
@@ -305,14 +312,18 @@ def run_hybrid_search(original_query, sparse_query=None, reranker_query=None, to
                          for doc_id in candidates if docs_dict.get(doc_id)]
     
     # Step 4: Reranker로 Top-K 최종 선정
-    from retrieval.reranker import reranker
+    use_v2_reranker = os.getenv("USE_V2_RERANKER", "false").lower() == "true"
+    if use_v2_reranker:
+        from retrieval.reranker_v2 import reranker_v2 as active_reranker
+    else:
+        from retrieval.reranker import reranker as active_reranker
     
     # Reranker 쿼리 결정 (None이면 original_query 사용)
     if reranker_query is None:
         reranker_query = original_query
     
     if docs_with_content:
-        final_ranked_results = reranker.rerank(
+        final_ranked_results = active_reranker.rerank(
             reranker_query,  # 원본 쿼리 사용 (Phase 2 확정)
             docs_with_content, 
             top_k=top_k_final,

@@ -24,6 +24,10 @@ class EmbeddingClient:
         if gemini_api_key:
             genai.configure(api_key=gemini_api_key)
         
+        # BGE-M3 V3 (Fine-tuned)
+        self.bge_m3_v3_model = None
+        self.bge_m3_v3_path = "/root/IR/finetuned_bge_m3_v3"
+        
         # 쿼리 임베딩 캐시 (비용 절감)
         self.cache_dir = Path("cache")
         self.cache_dir.mkdir(exist_ok=True)
@@ -107,6 +111,13 @@ class EmbeddingClient:
                     embeddings.append([0.0] * 768)
             
             return np.array(embeddings)
+        elif model_name == "bge_m3_v3":
+            if self.bge_m3_v3_model is None:
+                from FlagEmbedding import BGEM3FlagModel
+                self.bge_m3_v3_model = BGEM3FlagModel(self.bge_m3_v3_path, use_fp16=True)
+            
+            output = self.bge_m3_v3_model.encode(sentences, return_dense=True, return_sparse=False, return_colbert_vecs=False)
+            return output['dense_vecs']
         else:
             raise ValueError(f"Unknown model: {model_name}")
 
@@ -118,6 +129,9 @@ class EmbeddingClient:
         """
         # SBERT는 캐싱 없이 바로 생성 (로컬 모델, 빠름)
         if model_name == "sbert":
+            return self.get_embedding([query], model_name=model_name)[0]
+        
+        if model_name == "bge_m3_v3":
             return self.get_embedding([query], model_name=model_name)[0]
         
         # API 기반 모델은 캐시 확인
