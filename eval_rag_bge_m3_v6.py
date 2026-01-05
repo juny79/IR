@@ -21,17 +21,26 @@ from models.openai_client import openai_client
 # ==========================================
 DOC_PATH = "/root/IR/data/documents.jsonl"
 EVAL_PATH = "/root/IR/data/eval.jsonl"
-OUTPUT_FILE = "/root/IR/submission_bge_m3_sota_v6.csv"
+OUTPUT_FILE = os.getenv("SUBMISSION_FILE") or "/root/IR/submission_bge_m3_sota_v6.csv"
 
 # 모델 설정
 BGE_M3_MODEL = 'BAAI/bge-m3'
 RERANK_MODEL = 'BAAI/bge-reranker-v2-m3'
 
-# 파라미터
-TOP_CANDIDATES = 200
-FINAL_TOPK = 5
-ALPHA = 0.5 # Hybrid weight (Dense vs Sparse)
-RRF_K = 60
+# 파라미터 (환경변수로 오버라이드 가능)
+# - TOP_CANDIDATES: 하이브리드 검색 후 reranker 후보군 크기
+# - FINAL_TOPK: 최종 제출 topk 길이
+# - ALPHA: Dense vs Sparse 가중치 (0~1)
+# - RRF_K: multi-query RRF fusion smoothing
+TOP_CANDIDATES = int(os.getenv("TOP_CANDIDATES", os.getenv("TOP_K_RETRIEVE", "200")))
+FINAL_TOPK = int(os.getenv("FINAL_TOPK", "5"))
+ALPHA = float(os.getenv("ALPHA", "0.5"))  # Hybrid weight (Dense vs Sparse)
+RRF_K = int(os.getenv("RRF_K", "60"))
+
+# 옵션
+USE_MULTI_QUERY = (os.getenv("USE_MULTI_QUERY", "true").lower() in {"1", "true", "yes", "y"})
+USE_LLM_RERANK_TOP3 = (os.getenv("USE_LLM_RERANK_TOP3", "true").lower() in {"1", "true", "yes", "y"})
+SKIP_ANSWER = (os.getenv("SKIP_ANSWER", "false").lower() in {"1", "true", "yes", "y"})
 
 # 감점 방지를 위한 검색 제외 ID (0.9273 기준 최적화)
 # 76(Merge Sort), 108(Relativity)은 유효한 질문이므로 제외
@@ -143,6 +152,10 @@ def get_multi_queries(messages):
         return queries[:3]
     except:
         return [messages[-1]["content"]]
+
+
+def get_single_query(messages):
+    return [messages[-1]["content"]]
 
 def rerank_with_llm_v2(messages, candidates):
     """
@@ -270,7 +283,7 @@ with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             continue
 
         # Multi-Query Generation
-        queries = get_multi_queries(messages)
+        queries = get_multi_queries(messages) if USE_MULTI_QUERY else get_single_query(messages)
         
         # Hybrid Search with RRF
         candidate_indices = hybrid_search_multi(queries, top_k=TOP_CANDIDATES)
@@ -285,21 +298,25 @@ with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             
             final_topk_indices = [idx for idx, _ in sorted_ranks[:FINAL_TOPK]]
             
-            # LLM Reranking for Top 3 (to ensure Rank 1 is the absolute best)
+            # LLM Reranking for Top 3 (optional)
             # v6: Use full messages for context-aware reranking
-            top3_candidates = [(doc_ids[idx], doc_contents[idx]) for idx in final_topk_indices[:3]]
-            best_idx_in_top3 = rerank_with_llm_v2(messages, top3_candidates)
-            
-            if best_idx_in_top3 > 0 and best_idx_in_top3 < len(final_topk_indices):
-                # Swap the best one to the front
-                best_val = final_topk_indices.pop(best_idx_in_top3)
-                final_topk_indices.insert(0, best_val)
+            if USE_LLM_RERANK_TOP3:
+                top3_candidates = [(doc_ids[idx], doc_contents[idx]) for idx in final_topk_indices[:3]]
+                best_idx_in_top3 = rerank_with_llm_v2(messages, top3_candidates)
+                
+                if best_idx_in_top3 > 0 and best_idx_in_top3 < len(final_topk_indices):
+                    # Swap the best one to the front
+                    best_val = final_topk_indices.pop(best_idx_in_top3)
+                    final_topk_indices.insert(0, best_val)
             
             final_topk_ids = [doc_ids[idx] for idx in final_topk_indices]
             
-            # Answer generation using Top 3
-            context = "\n".join([doc_contents[idx] for idx in final_topk_indices[:3]])
-            answer = generate_answer(rerank_query, context)
+            # Answer generation using Top 3 (optional)
+            if SKIP_ANSWER:
+                answer = ""
+            else:
+                context = "\n".join([doc_contents[idx] for idx in final_topk_indices[:3]])
+                answer = generate_answer(rerank_query, context)
             
             res = {
                 "eval_id": eval_id,
